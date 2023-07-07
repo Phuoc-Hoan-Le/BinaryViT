@@ -621,13 +621,6 @@ class ViTForImageClassification(nn.Module):
     def __init__(self, config: ViTConfig) -> None:
         super().__init__()
         self.num_labels = config.num_labels
-        config.hidden_size = [64, 128, 256, 512]
-        config.depths = [3, 4, 8, 4]
-        config.reduction_ratio = [8, 4, 1, 1]
-        config.num_attention_heads = [config.hidden_size[0]//64, config.hidden_size[1]//64, 
-                                      config.hidden_size[2]//64, config.hidden_size[3]//64]
-        config.intermediate_size = [config.hidden_size[0] * 8, config.hidden_size[1] * 8, 
-                                    config.hidden_size[2] * 4, config.hidden_size[3] * 4]
         config.num_hidden_layers = sum(config.depths)
         config.stages = generating_stage_per_depth(config.depths)
 

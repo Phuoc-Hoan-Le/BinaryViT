@@ -5,7 +5,7 @@ torchrun --nproc_per_node=8 main.py \
     --num-workers=32 \
     --batch-size=64 \
     --epochs=300 \
-    --model=configs/deit-small-patch16-224 \
+    --model=configs/binaryvit-small-patch4-224 \
     --dropout=0.0 \
     --drop-path=0.0 \
     --opt=adamw \
@@ -19,7 +19,7 @@ torchrun --nproc_per_node=8 main.py \
     --mixup=0.0 \
     --cutmix=0.0 \
     --data-path=${DATA_DIR} \
-    --output-dir=logs/binaryvit-small-patch16-224-some-fp \
+    --output-dir=logs/binaryvit-small-patch4-224-some-fp \
     --teacher-model=configs/deit-small-patch16-224 \
     --teacher-model-file=logs/deit-small-patch16-224/best.pth \
     --model-type=extra-res-pyramid \
@@ -30,5 +30,5 @@ torchrun --nproc_per_node=8 main.py \
     --avg-res3 \
     --avg-res5 \
     --some-fp \
-    # --resume=logs/binaryvit-small-patch16-224-some-fp/checkpoint.pth \
-    # --current-best-model=logs/binaryvit-small-patch16-224-some-fp/best.pth \
+    # --resume=logs/binaryvit-small-patch4-224-some-fp/checkpoint.pth \
+    # --current-best-model=logs/binaryvit-small-patch4-224-some-fp/best.pth \
