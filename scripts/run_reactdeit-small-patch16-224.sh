@@ -26,7 +26,6 @@ torchrun --nproc_per_node=8 main.py \
     --replace-ln-bn \
     --weight-bits=1 \
     --input-bits=1 \
-    --att-prob-quantizer-type=bit \
     --enable-cls-token \
     --disable-layerscale \
     # --resume=logs/reactdeit-small-patch16-224/checkpoint.pth \

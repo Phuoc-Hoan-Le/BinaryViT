@@ -72,7 +72,6 @@ def get_model(args, model_config, model_type, weight_bits, input_bits):
 
     config.weight_bits = weight_bits
     config.input_bits = input_bits
-    config.att_prob_quantizer_type = args.att_prob_quantizer_type
     config.some_fp = args.some_fp
 
     if config.weight_bits == 32 and config.input_bits == 32:

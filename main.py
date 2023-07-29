@@ -43,8 +43,6 @@ def get_args_parser():
 
     parser.add_argument('--weight-bits', default=32, type=int, help='Bitwidth of weights')
     parser.add_argument('--input-bits', default=32, type=int, help='Bitwidth of activations')
-    parser.add_argument('--att-prob-quantizer-type', default='bivit', type=str,
-                        help='Attention probability quantizer')
     parser.add_argument('--some-fp', action='store_true', help='Patch embedding layers in the middle are in full-precision')
 
     parser.add_argument('--teacher-model', default='', type=str, metavar='MODEL',

@@ -15,7 +15,7 @@ from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPo
 from transformers.utils import logging
 from transformers import ViTConfig
 from timm.models.layers import trunc_normal_, DropPath
-from .utils_quant import QuantizeLinear, BinaryQuantizer, ZMeanBinaryQuantizer, BiTBinaryQuantizer, BiTHeadBinaryQuantizer
+from .utils_quant import QuantizeLinear, BinaryQuantizer, BiTBinaryQuantizer
 
 
 logger = logging.get_logger(__name__)
@@ -154,16 +154,9 @@ class ViTSelfAttention(nn.Module):
         self.movev2 = nn.Parameter(torch.zeros(config.hidden_size))
 
         self.act_quantizer = BinaryQuantizer
-        self.att_prob_quantizer_type = config.att_prob_quantizer_type
         
-        if self.att_prob_quantizer_type == "bivit":
-            self.att_prob_quantizer = ZMeanBinaryQuantizer
-        elif self.att_prob_quantizer_type == "bit":
-            self.att_prob_quantizer = BiTBinaryQuantizer
-            self.att_prob_clip = nn.Parameter(torch.tensor(0.005))
-        elif self.att_prob_quantizer_type == "head-wise-bit":
-            self.att_prob_quantizer = BiTHeadBinaryQuantizer
-            self.att_prob_clip = nn.Parameter(torch.ones(self.num_attention_heads) * 0.005)
+        self.att_prob_quantizer = BiTBinaryQuantizer
+        self.att_prob_clip = nn.Parameter(torch.tensor(0.005))
 
         self.norm_context = config.norm_layer(config.hidden_size, eps=config.layer_norm_eps)
 
@@ -206,12 +199,8 @@ class ViTSelfAttention(nn.Module):
         attention_scores = attention_scores / math.sqrt(self.attention_head_size)
 
         # Normalize the attention scores to probabilities.
-        if self.att_prob_quantizer_type == "bivit":
-            attention_probs = nn.functional.softmax(attention_scores, dim=-1) - nn.functional.softmax(attention_scores, dim=-1).detach() \
-                                                                            + self.att_prob_quantizer.apply(attention_scores).detach()
-        else:
-            attention_probs = nn.functional.softmax(attention_scores, dim=-1)
-            attention_probs = self.att_prob_quantizer.apply(attention_probs, self.att_prob_clip)
+        attention_probs = nn.functional.softmax(attention_scores, dim=-1)
+        attention_probs = self.att_prob_quantizer.apply(attention_probs, self.att_prob_clip)
 
         # This is actually dropping out entire tokens to attend to, which might
         # seem a bit unusual, but is taken from the original Transformer paper.
