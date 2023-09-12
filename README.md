@@ -13,13 +13,25 @@ An overview of our architectural modifications is illustrated below:
 * python 3.8.10, torch>=1.10.1, torchvision>=0.11.2, timm==0.6.12, transformers>=4.20.1
     
 ### 2. To run:
-* To get the full-precision DeiT-S, either download it from Huggingface or train it from scratch using the script, "scripts/run_deit-small-patch16-224.sh".
-* To get the ReActNet-DeiT-S, run "scripts/run_reactdeit-small-patch16-224.sh".
-* To get the BinaryViT model, run "scripts/run_binaryvit-small-patch4-224.sh".
-* To get the BinaryViT model with all patch embedding layers in full-precision, run "scripts/run_binaryvit-small-patch4-224-some-fp.sh".
-* The other sh files in "scripts/" contains the settings to get the results of the 2nd, 3rd, and 4th row of Table 3 of the [paper](https://arxiv.org/abs/2306.16678).
+* To get the full-precision DeiT-S, either download it from Huggingface or train it from scratch by running:
+  ```
+  bash scripts/run_deit-small-patch16-224.sh
+  ```
+* To get the ReActNet-DeiT-S, run:
+  ```
+  bash scripts/run_reactdeit-small-patch16-224.sh
+  ```
+* To get the BinaryViT model, run:
+  ```
+  bash scripts/run_binaryvit-small-patch4-224.sh
+  ```
+* To get the BinaryViT model with all patch embedding layers in full-precision, run:
+  ```
+  bash scripts/run_binaryvit-small-patch4-224-some-fp.sh
+  ```
+* The other sh files in `scripts` directory contains the settings to get the results of the 2nd, 3rd, and 4th row of Table 3 of the [paper](https://arxiv.org/abs/2306.16678).
 
-* Note: The argument "enable-cls-token" and "disable-layerscale" only affects the ViT models that are in binary or quantized. "enable-cls-token" is only implemented for "modeling_qvit_extra_res.py". The argument "num-workers" should be set according to system specs
+* Note: The argument `--enable-cls-token` and `--disable-layerscale` only affects the ViT models that are in binary or quantized. `--enable-cls-token` is only implemented for `modeling_qvit_extra_res.py`. The argument `--num-workers` should be set according to system specs.
 
 ## Citation
 If you find our work or this code useful, please cite our paper:
