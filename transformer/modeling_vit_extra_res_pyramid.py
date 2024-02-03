@@ -15,6 +15,7 @@ from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPo
 from transformers.utils import logging
 from transformers import ViTConfig
 from timm.models.layers import trunc_normal_, DropPath, to_2tuple
+from .utils_quant import QuantizeLinear, QuantizeConv2d, BinaryQuantizer, BiTBinaryQuantizer
 
 
 logger = logging.get_logger(__name__)
@@ -126,15 +127,15 @@ class ViTSelfAttention(nn.Module):
         self.movek = nn.Parameter(torch.zeros(config.hidden_size[config.stages[layer_num]]))
         self.movev = nn.Parameter(torch.zeros(config.hidden_size[config.stages[layer_num]]))
 
-        self.query = nn.Linear(config.hidden_size[config.stages[layer_num]], self.all_head_size)
-        self.key = nn.Linear(config.hidden_size[config.stages[layer_num]], self.all_head_size)
-        self.value = nn.Linear(config.hidden_size[config.stages[layer_num]], self.all_head_size)
+        self.query = QuantizeLinear(config.hidden_size[config.stages[layer_num]], self.all_head_size, config=config)
+        self.key = QuantizeLinear(config.hidden_size[config.stages[layer_num]], self.all_head_size, config=config)
+        self.value = QuantizeLinear(config.hidden_size[config.stages[layer_num]], self.all_head_size, config=config)
 
         self.reduction_ratio = config.reduction_ratio[config.stages[layer_num]]
         if self.reduction_ratio > 1:
             self.pool = nn.AvgPool2d(config.reduction_ratio[config.stages[layer_num]], stride=config.reduction_ratio[config.stages[layer_num]])
             self.mover = nn.Parameter(torch.zeros(config.hidden_size[config.stages[layer_num]]))
-            self.reduction = nn.Linear(config.hidden_size[config.stages[layer_num]], self.all_head_size)
+            self.reduction = QuantizeLinear(config.hidden_size[config.stages[layer_num]], self.all_head_size, config=config)
             self.norm_r = config.norm_layer(config.hidden_size[config.stages[layer_num]], eps=config.layer_norm_eps)
             self.rprelur = RPReLU(config.hidden_size[config.stages[layer_num]])
 
@@ -149,6 +150,15 @@ class ViTSelfAttention(nn.Module):
         self.moveq2 = nn.Parameter(torch.zeros(config.hidden_size[config.stages[layer_num]]))
         self.movek2 = nn.Parameter(torch.zeros(config.hidden_size[config.stages[layer_num]]))
         self.movev2 = nn.Parameter(torch.zeros(config.hidden_size[config.stages[layer_num]]))
+
+        self.act_quantizer = None
+        self.att_prob_quantizer = None
+        self.att_prob_clip = None
+
+        if config.input_bits == 1:
+            self.act_quantizer = BinaryQuantizer
+            self.att_prob_quantizer = BiTBinaryQuantizer
+            self.att_prob_clip = nn.Parameter(torch.tensor(0.005))
 
         self.norm_context = config.norm_layer(config.hidden_size[config.stages[layer_num]], eps=config.layer_norm_eps)
 
@@ -187,6 +197,11 @@ class ViTSelfAttention(nn.Module):
         key_layer = mixed_key_layer + self.movek2
         value_layer = mixed_value_layer + self.movev2
 
+        if self.act_quantizer is not None:
+            query_layer = self.act_quantizer.apply(query_layer)
+            key_layer = self.act_quantizer.apply(key_layer)
+            value_layer = self.act_quantizer.apply(value_layer)
+
         query_layer = self.transpose_for_scores(query_layer)
         key_layer = self.transpose_for_scores(key_layer)
         value_layer = self.transpose_for_scores(value_layer)
@@ -198,6 +213,8 @@ class ViTSelfAttention(nn.Module):
 
         # Normalize the attention scores to probabilities.
         attention_probs = nn.functional.softmax(attention_scores, dim=-1)
+        if self.att_prob_quantizer is not None:
+            attention_probs = self.att_prob_quantizer.apply(attention_probs, self.att_prob_clip)
 
         # This is actually dropping out entire tokens to attend to, which might
         # seem a bit unusual, but is taken from the original Transformer paper.
@@ -233,14 +250,14 @@ class ViTSelfOutput(nn.Module):
 
     def __init__(self, config: ViTConfig, layer_num) -> None:
         super().__init__()
-        self.dense = nn.Linear(config.hidden_size[config.stages[layer_num]], config.hidden_size[config.stages[layer_num]])
+        self.dense = QuantizeLinear(config.hidden_size[config.stages[layer_num]], config.hidden_size[config.stages[layer_num]], config=config)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
         self.move = nn.Parameter(torch.zeros(config.hidden_size[config.stages[layer_num]]))
         self.norm = config.norm_layer(config.hidden_size[config.stages[layer_num]], eps=config.layer_norm_eps)
         self.rprelu = RPReLU(config.hidden_size[config.stages[layer_num]])
 
-        self.layerscale = LayerScale(config.hidden_size[config.stages[layer_num]])
+        self.layerscale = LayerScale(config.hidden_size[config.stages[layer_num]]) if not config.disable_layerscale else nn.Identity()
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
 
@@ -276,7 +293,7 @@ class ViTAttention(nn.Module):
 class ViTIntermediate(nn.Module):
     def __init__(self, config: ViTConfig, layer_num) -> None:
         super().__init__()
-        self.dense = nn.Linear(config.hidden_size[config.stages[layer_num]], config.intermediate_size[config.stages[layer_num]])
+        self.dense = QuantizeLinear(config.hidden_size[config.stages[layer_num]], config.intermediate_size[config.stages[layer_num]], config=config)
         # if isinstance(config.hidden_act, str):
         #     self.intermediate_act_fn = ACT2FN[config.hidden_act]
         # else:
@@ -300,7 +317,7 @@ class ViTIntermediate(nn.Module):
 class ViTOutput(nn.Module):
     def __init__(self, config: ViTConfig, layer_num, drop_path=0.0) -> None:
         super().__init__()
-        self.dense = nn.Linear(config.intermediate_size[config.stages[layer_num]], config.hidden_size[config.stages[layer_num]])
+        self.dense = QuantizeLinear(config.intermediate_size[config.stages[layer_num]], config.hidden_size[config.stages[layer_num]], config=config)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
@@ -308,7 +325,7 @@ class ViTOutput(nn.Module):
         self.norm = config.norm_layer(config.hidden_size[config.stages[layer_num]], eps=config.layer_norm_eps)
         self.rprelu = RPReLU(config.hidden_size[config.stages[layer_num]])
         self.pooling = nn.AvgPool1d(config.intermediate_size[config.stages[layer_num]] // config.hidden_size[config.stages[layer_num]])
-        self.layerscale = LayerScale(config.hidden_size[config.stages[layer_num]])
+        self.layerscale = LayerScale(config.hidden_size[config.stages[layer_num]]) if not config.disable_layerscale else nn.Identity()
 
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -321,6 +338,7 @@ class ViTOutput(nn.Module):
         out = self.drop_path(out)
 
         return out
+
 
 
 
@@ -418,7 +436,7 @@ class BinaryPatchEmbed(nn.Module):
         self.norm0 = config.norm_layer(in_dim)
         
         self.move = nn.Parameter(torch.zeros(1, in_dim, 1, 1))
-        self.proj = nn.Conv2d(in_dim, out_dim, self.patch_size, self.patch_size, bias=False)
+        self.proj = QuantizeConv2d(in_dim, out_dim, self.patch_size, self.patch_size, bias=False, config=config)
         self.pool = nn.AvgPool2d(patch_size, stride=patch_size)
         self.norm = config.norm_layer(out_dim)
         self.rprelu = RPReLU(out_dim)
@@ -490,9 +508,14 @@ class ViTEncoder(nn.Module):
         self.layer = nn.ModuleList([ViTLayer(config, i, drop_path=dpr[i]) for i in range(config.num_hidden_layers)])
         self.gradient_checkpointing = False
 
-        self.patch_embed1 = PatchEmbed(56, in_dim=config.hidden_size[0], out_dim=config.hidden_size[1], config=config)
-        self.patch_embed2 = PatchEmbed(28, in_dim=config.hidden_size[1], out_dim=config.hidden_size[2], config=config)
-        self.patch_embed3 = PatchEmbed(14, in_dim=config.hidden_size[2], out_dim=config.hidden_size[3], config=config)
+        if config.some_fp:
+            self.patch_embed1 = PatchEmbed(56, in_dim=config.hidden_size[0], out_dim=config.hidden_size[1], config=config)
+            self.patch_embed2 = PatchEmbed(28, in_dim=config.hidden_size[1], out_dim=config.hidden_size[2], config=config)
+            self.patch_embed3 = PatchEmbed(14, in_dim=config.hidden_size[2], out_dim=config.hidden_size[3], config=config)
+        else:
+            self.patch_embed1 = BinaryPatchEmbed(56, in_dim=config.hidden_size[0], out_dim=config.hidden_size[1], config=config)
+            self.patch_embed2 = BinaryPatchEmbed(28, in_dim=config.hidden_size[1], out_dim=config.hidden_size[2], config=config)
+            self.patch_embed3 = BinaryPatchEmbed(14, in_dim=config.hidden_size[2], out_dim=config.hidden_size[3], config=config)
             
         self.depths = config.depths
 

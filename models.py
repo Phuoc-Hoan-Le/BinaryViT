@@ -1,8 +1,6 @@
 from transformer.modeling_vit import ViTForImageClassification
 from transformer.modeling_vit_extra_res import ViTForImageClassification as ViTForImageClassificationExtraRes
-from transformer.modeling_qvit_extra_res import ViTForImageClassification as QViTForImageClassificationExtraRes
 from transformer.modeling_vit_extra_res_pyramid import ViTForImageClassification as PyramidViTForImageClassification
-from transformer.modeling_qvit_extra_res_pyramid import ViTForImageClassification as QPyramidViTForImageClassification
 from transformers import ViTConfig
 import torch
 import torch.nn as nn
@@ -209,17 +207,13 @@ def get_model(args, model_config, model_type, weight_bits, input_bits):
     config.input_bits = input_bits
     config.some_fp = args.some_fp
 
-    if config.weight_bits == 32 and config.input_bits == 32:
-        if model_type == "extra-res-pyramid":
-            model = PyramidViTForImageClassification(config=config)
-        elif model_type == "extra-res":
-            model = ViTForImageClassificationExtraRes(config=config)
-        else:    
-            model = ViTForImageClassification(config=config)
+    if model_type == "extra-res-pyramid":
+        model = PyramidViTForImageClassification(config=config)
+    elif model_type == "extra-res":
+        model = ViTForImageClassificationExtraRes(config=config)
+    elif model_type == "deit":    
+        model = ViTForImageClassification(config=config)
     else:
-        if model_type == "extra-res-pyramid":
-            model = QPyramidViTForImageClassification(config=config)
-        else:
-            model = QViTForImageClassificationExtraRes(config=config)
+        raise NotImplementedError("Need to specify a supported model type.")
     
     return model

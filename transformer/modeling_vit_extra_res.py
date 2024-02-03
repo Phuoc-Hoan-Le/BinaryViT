@@ -15,6 +15,7 @@ from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPo
 from transformers.utils import logging
 from transformers import ViTConfig
 from timm.models.layers import trunc_normal_, DropPath
+from .utils_quant import QuantizeLinear, BinaryQuantizer, BiTBinaryQuantizer
 
 
 logger = logging.get_logger(__name__)
@@ -57,7 +58,13 @@ class ViTEmbeddings(nn.Module):
         self.patch_embeddings = ViTPatchEmbeddings(config)
         num_patches = self.patch_embeddings.num_patches
 
-        self.position_embeddings = nn.Parameter(torch.zeros(1, num_patches, config.hidden_size))
+        self.enable_cls_token = config.enable_cls_token
+        if self.enable_cls_token:
+            self.cls_token = nn.Parameter(torch.zeros(1, 1, config.hidden_size))
+            nn.init.normal_(self.cls_token, std=1e-6)
+            self.position_embeddings = nn.Parameter(torch.zeros(1, num_patches + 1, config.hidden_size))
+        else:
+            self.position_embeddings = nn.Parameter(torch.zeros(1, num_patches, config.hidden_size))
         trunc_normal_(self.position_embeddings, std=.02)
 
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
@@ -68,11 +75,17 @@ class ViTEmbeddings(nn.Module):
         batch_size, num_channels, height, width = pixel_values.shape
         embeddings = self.patch_embeddings(pixel_values)
 
+        # add the [CLS] token to the embedded patch tokens
+        if self.enable_cls_token:
+            cls_tokens = self.cls_token.expand(batch_size, -1, -1)
+            embeddings = torch.cat((cls_tokens, embeddings), dim=1)
+
         embeddings = embeddings + self.position_embeddings
 
         embeddings = self.dropout(embeddings)
 
         return embeddings
+
 
 
 class ViTPatchEmbeddings(nn.Module):
@@ -108,7 +121,7 @@ class ViTPatchEmbeddings(nn.Module):
 
 
 class ViTSelfAttention(nn.Module):
-    def __init__(self, config: ViTConfig) -> None:
+    def __init__(self, config: ViTConfig, layer_num) -> None:
         super().__init__()
         if config.hidden_size % config.num_attention_heads != 0 and not hasattr(config, "embedding_size"):
             raise ValueError(
@@ -124,18 +137,33 @@ class ViTSelfAttention(nn.Module):
         self.movek = nn.Parameter(torch.zeros(config.hidden_size))
         self.movev = nn.Parameter(torch.zeros(config.hidden_size))
 
-        self.query = nn.Linear(config.hidden_size, self.all_head_size, bias=config.qkv_bias)
-        self.key = nn.Linear(config.hidden_size, self.all_head_size, bias=config.qkv_bias)
-        self.value = nn.Linear(config.hidden_size, self.all_head_size, bias=config.qkv_bias)
+        self.query = QuantizeLinear(config.hidden_size, self.all_head_size, config=config)
+        self.key = QuantizeLinear(config.hidden_size, self.all_head_size, config=config)
+        self.value = QuantizeLinear(config.hidden_size, self.all_head_size, config=config)
 
-        self.normq = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
-        self.normk = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
-        self.normv = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.normq = config.norm_layer(config.hidden_size, eps=config.layer_norm_eps)
+        self.normk = config.norm_layer(config.hidden_size, eps=config.layer_norm_eps)
+        self.normv = config.norm_layer(config.hidden_size, eps=config.layer_norm_eps)
+
         self.rpreluq = RPReLU(config.hidden_size)
         self.rpreluk = RPReLU(config.hidden_size)
         self.rpreluv = RPReLU(config.hidden_size)
 
-        self.norm_context = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.moveq2 = nn.Parameter(torch.zeros(config.hidden_size))
+        self.movek2 = nn.Parameter(torch.zeros(config.hidden_size))
+        self.movev2 = nn.Parameter(torch.zeros(config.hidden_size))
+        
+        self.act_quantizer = None
+        self.att_prob_quantizer = None
+        self.att_prob_clip = None
+
+        if config.input_bits == 1:
+            self.act_quantizer = BinaryQuantizer
+            self.att_prob_quantizer = BiTBinaryQuantizer
+            self.att_prob_clip = nn.Parameter(torch.tensor(0.005))
+
+        self.norm_context = config.norm_layer(config.hidden_size, eps=config.layer_norm_eps)
+
         self.rprelu_context = RPReLU(config.hidden_size)
 
         self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
@@ -157,9 +185,18 @@ class ViTSelfAttention(nn.Module):
         mixed_key_layer = self.rpreluk(mixed_key_layer)
         mixed_value_layer = self.rpreluv(mixed_value_layer)
 
-        query_layer = self.transpose_for_scores(mixed_query_layer)
-        key_layer = self.transpose_for_scores(mixed_key_layer)
-        value_layer = self.transpose_for_scores(mixed_value_layer)
+        query_layer = mixed_query_layer + self.moveq2
+        key_layer = mixed_key_layer + self.movek2
+        value_layer = mixed_value_layer + self.movev2
+
+        if self.act_quantizer is not None:
+            query_layer = self.act_quantizer.apply(query_layer)
+            key_layer = self.act_quantizer.apply(key_layer)
+            value_layer = self.act_quantizer.apply(value_layer)
+
+        query_layer = self.transpose_for_scores(query_layer)
+        key_layer = self.transpose_for_scores(key_layer)
+        value_layer = self.transpose_for_scores(value_layer)
 
         # Take the dot product between "query" and "key" to get the raw attention scores.
         attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
@@ -168,6 +205,8 @@ class ViTSelfAttention(nn.Module):
 
         # Normalize the attention scores to probabilities.
         attention_probs = nn.functional.softmax(attention_scores, dim=-1)
+        if self.att_prob_quantizer is not None:
+            attention_probs = self.att_prob_quantizer.apply(attention_probs, self.att_prob_clip)
 
         # This is actually dropping out entire tokens to attend to, which might
         # seem a bit unusual, but is taken from the original Transformer paper.
@@ -194,14 +233,14 @@ class ViTSelfOutput(nn.Module):
 
     def __init__(self, config: ViTConfig) -> None:
         super().__init__()
-        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
+        self.dense = QuantizeLinear(config.hidden_size, config.hidden_size, config=config)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
         self.move = nn.Parameter(torch.zeros(config.hidden_size))
-        self.norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.norm = config.norm_layer(config.hidden_size, eps=config.layer_norm_eps)
         self.rprelu = RPReLU(config.hidden_size)
 
-        self.layerscale = LayerScale(config.hidden_size)
+        self.layerscale = LayerScale(config.hidden_size) if not config.disable_layerscale else nn.Identity()
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
 
@@ -215,9 +254,9 @@ class ViTSelfOutput(nn.Module):
 
 
 class ViTAttention(nn.Module):
-    def __init__(self, config: ViTConfig) -> None:
+    def __init__(self, config: ViTConfig, layer_num) -> None:
         super().__init__()
-        self.attention = ViTSelfAttention(config)
+        self.attention = ViTSelfAttention(config, layer_num)
         self.output = ViTSelfOutput(config)
         self.pruned_heads = set()
 
@@ -237,14 +276,14 @@ class ViTAttention(nn.Module):
 class ViTIntermediate(nn.Module):
     def __init__(self, config: ViTConfig) -> None:
         super().__init__()
-        self.dense = nn.Linear(config.hidden_size, config.intermediate_size)
+        self.dense = QuantizeLinear(config.hidden_size, config.intermediate_size, config=config)
         # if isinstance(config.hidden_act, str):
         #     self.intermediate_act_fn = ACT2FN[config.hidden_act]
         # else:
         #     self.intermediate_act_fn = config.hidden_act
 
         self.move = nn.Parameter(torch.zeros(config.hidden_size))
-        self.norm = nn.LayerNorm(config.intermediate_size, eps=config.layer_norm_eps)
+        self.norm = config.norm_layer(config.intermediate_size, eps=config.layer_norm_eps)
         self.rprelu = RPReLU(config.intermediate_size)
 
 
@@ -263,15 +302,15 @@ class ViTIntermediate(nn.Module):
 class ViTOutput(nn.Module):
     def __init__(self, config: ViTConfig, drop_path=0.0) -> None:
         super().__init__()
-        self.dense = nn.Linear(config.intermediate_size, config.hidden_size)
+        self.dense = QuantizeLinear(config.intermediate_size, config.hidden_size, config=config)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
         self.move = nn.Parameter(torch.zeros(config.intermediate_size))
-        self.norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.norm = config.norm_layer(config.hidden_size, eps=config.layer_norm_eps)
         self.rprelu = RPReLU(config.hidden_size)
         self.pooling = nn.AvgPool1d(4)
-        self.layerscale = LayerScale(config.hidden_size)
+        self.layerscale = LayerScale(config.hidden_size) if not config.disable_layerscale else nn.Identity()
 
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -289,17 +328,17 @@ class ViTOutput(nn.Module):
 class ViTLayer(nn.Module):
     """This corresponds to the Block class in the timm implementation."""
 
-    def __init__(self, config: ViTConfig, drop_path=0.0) -> None:
+    def __init__(self, config: ViTConfig, layer_num, drop_path=0.0) -> None:
         super().__init__()
         self.chunk_size_feed_forward = config.chunk_size_feed_forward
         self.seq_len_dim = 1
-        self.attention = ViTAttention(config)
+        self.attention = ViTAttention(config, layer_num)
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
         self.intermediate = ViTIntermediate(config)
         self.output = ViTOutput(config, drop_path=drop_path)
-        self.layernorm_before = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
-        self.layernorm_after = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.layernorm_before = config.norm_layer(config.hidden_size, eps=config.layer_norm_eps)
+        self.layernorm_after = config.norm_layer(config.hidden_size, eps=config.layer_norm_eps)
 
         self.avg_res3 = config.avg_res3
         self.avg_res5 = config.avg_res5
@@ -350,7 +389,7 @@ class ViTLayer(nn.Module):
         if self.avg_res5:
             layer_output += self.layerscale_h5(self.avg_res_h5(hidden_states_norm.permute(0, 2, 1).view(-1, 384, 14, 14).contiguous()).view(-1, 384, 196).permute(0, 2, 1).contiguous())
             layer_output += self.layerscale_w5(self.avg_res_w5(hidden_states_norm.permute(0, 2, 1).view(-1, 384, 14, 14).contiguous()).view(-1, 384, 196).permute(0, 2, 1).contiguous())
-            
+
         outputs = (layer_output,) + outputs
 
         return outputs
@@ -361,7 +400,7 @@ class ViTEncoder(nn.Module):
         super().__init__()
         self.config = config
         dpr = [x.item() for x in torch.linspace(0, config.drop_path, config.num_hidden_layers)]
-        self.layer = nn.ModuleList([ViTLayer(config, drop_path=dpr[i]) for i in range(config.num_hidden_layers)])
+        self.layer = nn.ModuleList([ViTLayer(config, i, drop_path=dpr[i]) for i in range(config.num_hidden_layers)])
         self.gradient_checkpointing = False
 
     def forward(
@@ -419,7 +458,7 @@ class ViTModel(nn.Module):
         self.embeddings = ViTEmbeddings(config)
         self.encoder = ViTEncoder(config)
 
-        self.layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.layernorm = config.norm_layer(config.hidden_size, eps=config.layer_norm_eps)
 
     def get_input_embeddings(self) -> ViTPatchEmbeddings:
         return self.embeddings.patch_embeddings
@@ -486,6 +525,9 @@ class ViTForImageClassification(nn.Module):
         elif isinstance(module, nn.LayerNorm):
             module.bias.data.zero_()
             module.weight.data.fill_(1.0)
+        elif isinstance(module, nn.BatchNorm1d):
+            module.bias.data.zero_()
+            module.weight.data.fill_(1.0)
 
 
     def forward(
@@ -507,7 +549,10 @@ class ViTForImageClassification(nn.Module):
 
         sequence_output = outputs[0]
 
-        logits = self.classifier(torch.mean(sequence_output, dim=1))
+        if self.config.enable_cls_token:
+            logits = self.classifier(sequence_output[:, 0, :])
+        else:
+            logits = self.classifier(torch.mean(sequence_output, dim=1))
 
         if not return_dict:
             output = (logits,) + outputs[1:]

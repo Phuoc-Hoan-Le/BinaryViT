@@ -186,28 +186,28 @@ class TwnQuantizer(torch.autograd.Function):
 
 
 class QuantizeLinear(nn.Linear):
-    def __init__(self,  *kargs, bias=True, config=None):
+    def __init__(self,  *kargs, bias=False, config=None):
         super(QuantizeLinear, self).__init__(*kargs, bias=bias)
         self.weight_bits = config.weight_bits
         self.input_bits = config.input_bits
-        if self.weight_bits == 2:
+        
+        if self.weight_bits == 1:
+            self.weight_quantizer = BinaryQuantizer
+        elif self.weight_bits == 2:
             self.weight_quantizer = TwnQuantizer
             self.register_buffer('weight_clip_val', torch.tensor([-config.clip_val, config.clip_val]))
-        elif self.weight_bits == 1:
-            self.weight_quantizer = BinaryQuantizer
-        else:
+        elif self.weight_bits < 32:
             self.weight_quantizer = SymQuantizer
             self.register_buffer('weight_clip_val', torch.tensor([-config.clip_val, config.clip_val]))
             
-        if self.input_bits < 32:
-            if self.input_bits == 1:
-                self.act_quantizer = BinaryQuantizer
-            elif self.input_bits == 2:
-                self.act_quantizer = TwnQuantizer
-                self.register_buffer('act_clip_val', torch.tensor([-config.clip_val, config.clip_val]))
-            else:
-                self.act_quantizer = SymQuantizer
-                self.register_buffer('act_clip_val', torch.tensor([-config.clip_val, config.clip_val]))
+        if self.input_bits == 1:
+            self.act_quantizer = BinaryQuantizer
+        elif self.input_bits == 2:
+            self.act_quantizer = TwnQuantizer
+            self.register_buffer('act_clip_val', torch.tensor([-config.clip_val, config.clip_val]))
+        elif self.input_bits < 32:
+            self.act_quantizer = SymQuantizer
+            self.register_buffer('act_clip_val', torch.tensor([-config.clip_val, config.clip_val]))
  
 
     def forward(self, input):
@@ -218,7 +218,7 @@ class QuantizeLinear(nn.Linear):
             binary_weights_no_grad = scaling_factor * torch.sign(real_weights)
             cliped_weights = torch.clamp(real_weights, -1.0, 1.0)
             weight = binary_weights_no_grad.detach() - cliped_weights.detach() + cliped_weights
-        elif self.input_bits < 32:
+        elif self.weight_bits < 32:
             weight = self.weight_quantizer.apply(self.weight, self.weight_clip_val, self.weight_bits, True)
         else:
             weight = self.weight
