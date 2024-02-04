@@ -121,7 +121,7 @@ class ViTPatchEmbeddings(nn.Module):
 
 
 class ViTSelfAttention(nn.Module):
-    def __init__(self, config: ViTConfig, layer_num) -> None:
+    def __init__(self, config: ViTConfig) -> None:
         super().__init__()
         if config.hidden_size % config.num_attention_heads != 0 and not hasattr(config, "embedding_size"):
             raise ValueError(
@@ -254,9 +254,9 @@ class ViTSelfOutput(nn.Module):
 
 
 class ViTAttention(nn.Module):
-    def __init__(self, config: ViTConfig, layer_num) -> None:
+    def __init__(self, config: ViTConfig) -> None:
         super().__init__()
-        self.attention = ViTSelfAttention(config, layer_num)
+        self.attention = ViTSelfAttention(config)
         self.output = ViTSelfOutput(config)
         self.pruned_heads = set()
 
@@ -328,11 +328,11 @@ class ViTOutput(nn.Module):
 class ViTLayer(nn.Module):
     """This corresponds to the Block class in the timm implementation."""
 
-    def __init__(self, config: ViTConfig, layer_num, drop_path=0.0) -> None:
+    def __init__(self, config: ViTConfig, drop_path=0.0) -> None:
         super().__init__()
         self.chunk_size_feed_forward = config.chunk_size_feed_forward
         self.seq_len_dim = 1
-        self.attention = ViTAttention(config, layer_num)
+        self.attention = ViTAttention(config)
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
         self.intermediate = ViTIntermediate(config)
@@ -400,7 +400,7 @@ class ViTEncoder(nn.Module):
         super().__init__()
         self.config = config
         dpr = [x.item() for x in torch.linspace(0, config.drop_path, config.num_hidden_layers)]
-        self.layer = nn.ModuleList([ViTLayer(config, i, drop_path=dpr[i]) for i in range(config.num_hidden_layers)])
+        self.layer = nn.ModuleList([ViTLayer(config, drop_path=dpr[i]) for i in range(config.num_hidden_layers)])
         self.gradient_checkpointing = False
 
     def forward(

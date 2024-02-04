@@ -224,9 +224,9 @@ class QuantizeLinear(nn.Linear):
             weight = self.weight
 
         if self.input_bits == 1:
-            ba = self.act_quantizer.apply(input)
+            input = self.act_quantizer.apply(input)
         
-        out = nn.functional.linear(ba, weight)
+        out = nn.functional.linear(input, weight)
         
         if not self.bias is None:
             out += self.bias.view(1, -1).expand_as(out) 
@@ -239,40 +239,46 @@ class QuantizeConv2d(nn.Conv2d):
         super(QuantizeConv2d, self).__init__(*kargs, bias=bias)
         self.weight_bits = config.weight_bits
         self.input_bits = config.input_bits
-        if self.weight_bits == 2:
+        
+        if self.weight_bits == 1:
+            self.weight_quantizer = BinaryQuantizer
+        elif self.weight_bits == 2:
             self.weight_quantizer = TwnQuantizer
             self.register_buffer('weight_clip_val', torch.tensor([-config.clip_val, config.clip_val]))
-        elif self.weight_bits == 1:
-            self.weight_quantizer = BinaryQuantizer
-        else:
+        elif self.weight_bits < 32:
             self.weight_quantizer = SymQuantizer
             self.register_buffer('weight_clip_val', torch.tensor([-config.clip_val, config.clip_val]))
             
-        if self.input_bits < 32:
-            if self.input_bits == 1:
-                self.act_quantizer = BinaryQuantizer
-            elif self.input_bits == 2:
-                self.act_quantizer = TwnQuantizer
-                self.register_buffer('act_clip_val', torch.tensor([-config.clip_val, config.clip_val]))
-            else:
-                self.act_quantizer = SymQuantizer
-                self.register_buffer('act_clip_val', torch.tensor([-config.clip_val, config.clip_val]))
+        if self.input_bits == 1:
+            self.act_quantizer = BinaryQuantizer
+        elif self.input_bits == 2:
+            self.act_quantizer = TwnQuantizer
+            self.register_buffer('act_clip_val', torch.tensor([-config.clip_val, config.clip_val]))
+        elif self.input_bits < 32:
+            self.act_quantizer = SymQuantizer
+            self.register_buffer('act_clip_val', torch.tensor([-config.clip_val, config.clip_val]))
  
 
     def forward(self, input):
-        # This forward pass is meant for only binary weights and activations
-        real_weights = self.weight
-        scaling_factor = torch.mean(torch.mean(torch.mean(abs(real_weights),dim=3,keepdim=True),dim=2,keepdim=True),dim=1,keepdim=True)
-        #print(scaling_factor, flush=True)
-        scaling_factor = scaling_factor.detach()
-        binary_weights_no_grad = scaling_factor * torch.sign(real_weights)
-        cliped_weights = torch.clamp(real_weights, -1.0, 1.0)
-        binary_weights = binary_weights_no_grad.detach() - cliped_weights.detach() + cliped_weights
-        #print(binary_weights, flush=True)
+        if self.weight_bits == 1:
+            # This forward pass is meant for only binary weights and activations
+            real_weights = self.weight
+            scaling_factor = torch.mean(torch.mean(torch.mean(abs(real_weights),dim=3,keepdim=True),dim=2,keepdim=True),dim=1,keepdim=True)
+            #print(scaling_factor, flush=True)
+            scaling_factor = scaling_factor.detach()
+            binary_weights_no_grad = scaling_factor * torch.sign(real_weights)
+            cliped_weights = torch.clamp(real_weights, -1.0, 1.0)
+            weight = binary_weights_no_grad.detach() - cliped_weights.detach() + cliped_weights
+            #print(binary_weights, flush=True)
+        elif self.weight_bits < 32:
+            weight = self.weight_quantizer.apply(self.weight, self.weight_clip_val, self.weight_bits, True)
+        else:
+            weight = self.weight
 
-        ba = self.act_quantizer.apply(input)
+        if self.input_bits == 1:
+            input = self.act_quantizer.apply(input)
         
-        out = torch.nn.functional.conv2d(ba, binary_weights, stride=self.stride, padding=self.padding)
+        out = nn.functional.conv2d(input, weight, stride=self.stride, padding=self.padding)
         
         if not self.bias is None:
             out = out + self.bias.unsqueeze(0).unsqueeze(2).unsqueeze(3)
